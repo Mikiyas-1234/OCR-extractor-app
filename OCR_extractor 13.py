@@ -13,7 +13,7 @@ api_key = os.getenv("GOOGLE_API_KEY")
 if not api_key:  
     st.error("GOOGLE_API_KEY is missing. Please check your .env file or environment variables.")
 else:  
-    genai.configure(GOODGLE _API_KEY = "AIzaSyD7M2y-NWovMP1gQ96CYaBxhbCV2IUsMgQ")
+    genai.configure(GOOGLE_API_KEY="AIzaSyD7M2y-NWovMP1gQ96CYaBxhbCV2IUsMgQ")  
 
 def get_gemini_response(input_text, image, prompt):  
     """Generates a response from the Gemini model based on the input and image."""
