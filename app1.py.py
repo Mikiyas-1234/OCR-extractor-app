@@ -1,94 +1,138 @@
-# -*- coding: utf-8 -*-
-!pip install streamlit-jupyter
-!pip install google-generativeai
-!pip install python-dotenv
-!pip install Pillow
-!pip install -upgrade streamlit tqdm ipywidgets
-
 import streamlit as st
-import pandas as pd
-import math
-from pathlib import Path
+st.set_page_config(page_title="Ancient & Modern OCR", layout="wide")  # Must be first Streamlit command
 
-# Import necessary libraries
-import os
-import streamlit as st
+import easyocr
 from PIL import Image
-from dotenv import load_dotenv  # Use dotenv to load environment variables
-import google.generativeai as genai
+import os
+from dotenv import load_dotenv
+import base64
+import io
+import csv
+import json
+import torch
+import numpy as np
+from langdetect import detect
+from langchain.chains import LLMChain
+from langchain.prompts import PromptTemplate
+from langchain_openai import ChatOpenAI
+import sqlite3
+import unicodedata
+from datetime import datetime
+import regex
+from langchain.output_parsers import StructuredOutputParser
+import pandas as pd
+import openai
+import pytesseract
+import subprocess
 
-# Load all the environment variables from the .env file
+# Configure Tesseract path and optionally specify tessdata directory
+pytesseract.pytesseract.tesseract_cmd = r"C:\\Users\\amanz\\Python313\\project\\Mythical animals in archiology files\\OCR app\\tesseract.exe"
+os.environ['TESSDATA_PREFIX'] = r"C:\\Users\\amanz\\Python313\\project\\Mythical animals in archiology files\\OCR app\\tessdata"  # Optional: if using custom tessdata directory
+
+# Confirm Tesseract is working
+try:
+    version = subprocess.check_output([pytesseract.pytesseract.tesseract_cmd, "--version"], text=True)
+    st.sidebar.success("✅ Tesseract is working:\n" + version.splitlines()[0])
+except Exception as e:
+    st.sidebar.error(f"❌ Tesseract Error: {str(e)}")
+
+# Load environment variables
 load_dotenv()
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# Get the API key from the environment variables
-api_key = os.getenv("GOOGLE_API_KEY")
+# Load Ge'ez dictionary from a JSON file
+try:
+    with open("geez_dict.json", "r", encoding="utf-8") as f:
+        geez_dict = json.load(f)
+except FileNotFoundError:
+    geez_dict = {}
 
-# Check if the API key is set
-if not api_key:
-    st.error("API key not found. Please set the GOOGLE_API_KEY environment variable in your .env file.")
-    raise ValueError("API key not found. Please set the GOOGLE_API_KEY environment variable.")
-else:
-    # Configure the generative AI client with the provided API key
-    genai.configure(api_key=api_key)
-    st.success("API key successfully loaded and configured!")
+st.sidebar.title("🔧 Settings")
 
-def get_gemini_response(input_text, image, prompt):
-    """Generates a response from the Gemini model based on the input and image."""
+# Auto-detect script option
+auto_detect_script = st.sidebar.checkbox("🧠 Auto-detect Script Type", value=True)
+
+# Default or manual script selection (if auto-detect is off)
+manual_script_type = st.sidebar.radio("🧬 Script Type", ['Modern (OCR)', 'Ancient (GPT-4 Vision)'])
+
+# Confidence threshold
+min_confidence = st.sidebar.slider("🧐 Min OCR Confidence", 0, 100, 50)
+
+# Translation options
+translate = st.sidebar.checkbox("🌐 Translate OCR text?")
+available_langs = ['eng', 'fra', 'spa', 'deu', 'ita', 'por', 'ara', 'chi_sim', 'hin', 'amh']
+lang_display = {
+    'eng': 'English', 'fra': 'French', 'spa': 'Spanish', 'deu': 'German',
+    'ita': 'Italian', 'por': 'Portuguese', 'ara': 'Arabic', 'chi_sim': 'Chinese (Simplified)',
+    'hin': 'Hindi', 'amh': 'Amharic'
+}
+target_lang = st.sidebar.selectbox("📅 Translate To (Auto overrides if language is detected)", list(lang_display.values()), index=1)
+
+# Optional GPT-4 prompt
+user_prompt = st.sidebar.text_area("✍️ GPT-4 Prompt (for Ancient Scripts)", height=140, value="This image contains Geʿez or another ancient script. Please interpret or describe the content.")
+
+# Show installed Tesseract languages
+if st.sidebar.button("📚 List Installed OCR Languages"):
     try:
-        # Use generative AI model for processing input and image
-        response = genai.generate_text(prompt=prompt, input=image)
-        return response.text  # Get the text response
-    except Exception as e:
-        st.error(f"An error occurred while generating the response: {str(e)}")
-        return None
+        lang_output = subprocess.check_output([pytesseract.pytesseract.tesseract_cmd, "--list-langs"], stderr=subprocess.STDOUT, text=True)
+        st.sidebar.success("Installed Tesseract Languages:")
+        st.sidebar.text(lang_output)
+    except subprocess.CalledProcessError as e:
+        st.sidebar.error(f"Error listing Tesseract languages: {e.output}")
 
-def input_image_details(uploaded_file):
-    """Returns image details from the uploaded file."""
-    if uploaded_file is not None:
-        # Read the file into bytes
-        bytes_data = uploaded_file.getvalue()
-        image_parts = [
-            {
-                "mime_type": uploaded_file.type,  # Get the MIME type of the uploaded file
-                "data": bytes_data
-            }
-        ]
-        return image_parts
-    else:
-        raise FileNotFoundError("File not found")
+try:
+    lang_output = subprocess.check_output([pytesseract.pytesseract.tesseract_cmd, "--list-langs"], stderr=subprocess.STDOUT, text=True)
+    installed_langs = lang_output.splitlines()[1:]  # skip first line
+except Exception:
+    installed_langs = []
 
-# Initialize the Streamlit app
-st.set_page_config(page_title="MultiLanguage Text Extractor")
-st.header("MultiLanguage Text Extractor")
+# Ge'ez dictionary editing
+if st.sidebar.checkbox("✏️ Edit Geʽez Dictionary"):
+    new_char = st.sidebar.text_input("Character")
+    new_translit = st.sidebar.text_input("Transliteration")
+    new_meaning = st.sidebar.text_input("Meaning")
+    if st.sidebar.button("Add to Dictionary"):
+        geez_dict[new_char] = {"transliteration": new_translit, "meaning": new_meaning}
+        with open("geez_dict.json", "w", encoding="utf-8") as f:
+            json.dump(geez_dict, f, ensure_ascii=False, indent=2)
+        st.sidebar.success(f"Added {new_char} to dictionary.")
 
-# User inputs
-input_text = st.text_input("Input prompt:", key="input")
-uploaded_file = st.file_uploader("Choose an image containing text...", type=["jpg", "jpeg", "png"], key="image")
+if st.sidebar.checkbox("🔍 Search Geʽez Dictionary"):
+    search_query = st.sidebar.text_input("🔎 Search character or transliteration")
+    if search_query:
+        st.sidebar.markdown("### Search Results")
+        for char, data in geez_dict.items():
+            if search_query in char or search_query in data.get("transliteration", ""):
+                st.sidebar.markdown(f"**{char}** → {data.get('transliteration')} — {data.get('meaning')}")
 
-# Display uploaded image
-if uploaded_file is not None:
-    image = Image.open(uploaded_file)
-    st.image(image, caption="Uploaded Image", use_column_width=True)
+st.title("📜 Multilingual OCR + Ancient Script Reader")
+uploaded_files = st.file_uploader("📄 Upload image(s) (JPG/PNG)", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
 
-# Button to process the image
-submit = st.button("Tell me about the extracted text")
+st.sidebar.title("🛠 Manual Correction")
+manual_text_input = st.sidebar.text_area("✍️ Manually correct OCR output")
 
-# Generative AI prompt
-input_prompt = """
-You are an expert in understanding text in images. We will upload an image of the text, and you will analyze and describe the text in the image.
-The text can be in any language.
-"""
+conn = sqlite3.connect("ocr_results.db")
+cursor = conn.cursor()
+cursor.execute("""
+    CREATE TABLE IF NOT EXISTS results (
+        filename TEXT, 
+        raw_text TEXT, 
+        translated_text TEXT, 
+        transliteration TEXT, 
+        meaning TEXT,
+        entities TEXT,
+        timestamp TEXT
+    )
+""")
+conn.commit()
 
-# Button click logic
-if submit:
-    try:
-        image_data = input_image_details(uploaded_file)
-        response = get_gemini_response(input_text, image_data, input_prompt)
-
-        st.subheader("The Response is:")
-        if response:
-            st.write(response)
-        else:
-            st.error("No response generated. Please try again.")
-    except FileNotFoundError as e:
-        st.error(str(e))
+# OCR processing block
+if uploaded_files:
+    for uploaded_file in uploaded_files:
+        try:
+            image = Image.open(uploaded_file).convert("RGB")
+            st.image(image, caption=f"Uploaded Image: {uploaded_file.name}", use_column_width=True)
+            text = pytesseract.image_to_string(image, lang='eng')
+            st.text_area("📄 OCR Result", value=text, height=300)
+        except Exception as e:
+            st.error(f"🚫 OCR failed for {uploaded_file.name}: {str(e)}")
